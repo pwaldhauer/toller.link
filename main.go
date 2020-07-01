@@ -174,7 +174,7 @@ func getLinks(w http.ResponseWriter, r *http.Request) {
 func main() {
 	args := os.Args[1:]
 
-	if args[0] == "index" {
+	if len(args) > 0 && args[0] == "index" {
 		log.Fatal("lool")
 		return
 	}
