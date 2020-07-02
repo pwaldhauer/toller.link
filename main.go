@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 
 	"github.com/RediSearch/redisearch-go/redisearch"
@@ -164,7 +165,7 @@ func getLinks(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	var links []Link
-	links = findInRedis(query.Get("q"))
+	links = findInRedis(fmt.Sprintf("%s*", query.Get("q")))
 
 	jsonString, _ := json.Marshal(links)
 
@@ -184,5 +185,9 @@ func main() {
 	r.HandleFunc("/api/link", getLinks).Methods(http.MethodGet)
 	r.HandleFunc("/api/link", createLink).Methods(http.MethodPost)
 
-	log.Fatal(http.ListenAndServe(":8080", r))
+	headersOk := handlers.AllowedHeaders([]string{"X-Requested-With"})
+	originsOk := handlers.AllowedOrigins([]string{"*"})
+	methodsOk := handlers.AllowedMethods([]string{"GET", "HEAD", "POST", "PUT", "OPTIONS"})
+
+	log.Fatal(http.ListenAndServe(":8080", handlers.CORS(originsOk, headersOk, methodsOk)(r)))
 }
