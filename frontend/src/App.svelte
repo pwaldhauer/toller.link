@@ -5,6 +5,8 @@
 	import Link from './Link.svelte';
 	export let name;
 
+	const url = location.host == 'toller.link' ? '/' : 'http://localhost:8080/';
+
 	let query = '';
 
 	async function  handleQuery(ev) {
@@ -14,7 +16,7 @@
 	let links = []
 
 	async function loadLinks(query) {
-		const res = await fetch('http://localhost:8080/api/link?q=' + encodeURIComponent(query));
+		const res = await fetch(url + 'api/link?q=' + encodeURIComponent(query));
 		const data = await res.json();
 
 		if(data === null) {
@@ -47,6 +49,8 @@
 			  url={link.Url} 
 			  title={link.Title} 
 			  tags={link.Tags}
+			  contextBody={link.ContextBody}
+			  contextTitle={link.ContextTitle}
 			></Link>
 	{/each}
 		

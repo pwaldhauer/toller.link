@@ -19,9 +19,9 @@ import (
 func saveLinkToRedis(id string, link Link) {
 	c := redisearch.NewClient("localhost:6379", "tollerlink")
 	sc := redisearch.NewSchema(redisearch.DefaultOptions).
-		AddField(redisearch.NewTextField("body")).
+		AddField(redisearch.NewTextFieldOptions("body", redisearch.TextFieldOptions{Weight: 2.0})).
 		AddField(redisearch.NewTextField("url")).
-		AddField(redisearch.NewTextFieldOptions("tags", redisearch.TextFieldOptions{Sortable: true})).
+		AddField(redisearch.NewTextFieldOptions("tags", redisearch.TextFieldOptions{Weight: 10.0, Sortable: true})).
 		AddField(redisearch.NewTextFieldOptions("title", redisearch.TextFieldOptions{Weight: 5.0, Sortable: true})).
 		AddField(redisearch.NewNumericField("date"))
 
@@ -34,6 +34,7 @@ func saveLinkToRedis(id string, link Link) {
 	doc := redisearch.NewDocument(id, 1.0)
 	doc.Set("title", link.Title).
 		Set("url", link.Url).
+		Set("body", link.Body).
 		Set("tags", link.Tags).
 		Set("date", link.Date)
 
@@ -50,16 +51,23 @@ func findInRedis(query string) (links []Link) {
 
 	docs, total, _ = c.Search(redisearch.NewQuery(query).
 		SetLanguage("german").
-		Limit(0, 10).
+		Limit(0, 50).
 		SetSortBy("date", false).
-		SetReturnFields("title"))
+		SetReturnFields("title", "body").
+		Highlight([]string{"title", "body"}, "<b>", "</b>").
+		Summarize("title", "body"))
 
 	if total == 0 {
 		return links
 	}
 
 	for _, doc := range docs {
-		links = append(links, readLink(doc.Id))
+		link := readLink(doc.Id)
+
+		link.ContextTitle = fmt.Sprintf("%s", doc.Properties["title"])
+		link.ContextBody = fmt.Sprintf("%s", doc.Properties["body"])
+
+		links = append(links, link)
 	}
 
 	return links
@@ -75,45 +83,25 @@ func readLink(id string) (link Link) {
 		log.Fatal(err)
 		return
 	}
+	/*
+		contentPath := fmt.Sprintf("content/%s/content.html", id)
 
+		if _, err := os.Stat(contentPath); err == nil {
+			linkContent, _ := ioutil.ReadFile(contentPath)
+			link.Body = fmt.Sprintf("%s", linkContent)
+		}
+	*/
 	return link
 }
 
-/*
-func ExampleClient() {
-
-	// Create a client. By default a client is schemaless
-	// unless a schema is provided when creating the index
-
-
-	// Create a schema
-
-
-	// Drop an existing index. If the index does not exist an error is returned
-	c.Drop()
-
-	// Create the index with the given schema
-
-
-	// Create a document with an id and given score
-
-
-	// Searching with limit and sorting
-	docs, total, err := c.Search(redisearch.NewQuery("hello world").
-		Limit(0, 2).
-		SetReturnFields("title"))
-
-	fmt.Println(docs[0].Id, docs[0].Properties["title"], total, err)
-	// Output: doc1 Hello world 1 <nil>
-}
-*/
-// https://dev.to/moficodes/build-your-first-rest-api-with-go-2gcj
-
 type Link struct {
-	Date  int64
-	Url   string
-	Title string
-	Tags  string
+	Date         int64
+	Url          string
+	Title        string
+	Tags         string
+	Body         string
+	ContextTitle string
+	ContextBody  string
 }
 
 func createLink(w http.ResponseWriter, r *http.Request) {
@@ -137,10 +125,17 @@ func createLink(w http.ResponseWriter, r *http.Request) {
 	var filepath string
 
 	id = fmt.Sprintf("%s_%x", t.Format("20060102150405"), h.Sum(nil))
+	saveLinkToRedis(id, link)
 
 	dir = fmt.Sprintf("content/%s", id)
 
 	_ = os.Mkdir(dir, 0755)
+
+	contentPath := fmt.Sprintf("content/%s/content.html", id)
+	if link.Body != "" {
+		ioutil.WriteFile(contentPath, []byte(link.Body), 0644)
+		link.Body = ""
+	}
 
 	filepath = fmt.Sprintf("%s/link.json", dir)
 
@@ -148,8 +143,6 @@ func createLink(w http.ResponseWriter, r *http.Request) {
 	ioutil.WriteFile(filepath, jsonString, 0644)
 
 	fmt.Fprintf(w, "Link: %+v, %s", link, filepath)
-
-	saveLinkToRedis(id, link)
 
 	w.Header().Set("Content-Type", "application/json")
 
