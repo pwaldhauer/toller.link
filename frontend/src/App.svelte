@@ -1,12 +1,13 @@
 
 <script>
 	import { onMount } from 'svelte';
-
 	import Link from './Link.svelte';
+
 	export let name;
 
 	const url = location.host == 'toller.link' ? '/' : 'http://localhost:8080/';
 
+	let tokenInput;
 	let query = '';
 
 	async function  handleQuery(ev) {
@@ -15,9 +16,18 @@
 
 	let links = []
 
+
+	let accessToken = '';
+
 	async function loadLinks(query) {
-		const res = await fetch(url + 'api/link?q=' + encodeURIComponent(query));
-		const data = await res.json();
+		try {
+			const res = await fetch(url + 'api/link?q=' + encodeURIComponent(query), {
+			 headers: {
+      			'Authorization': accessToken
+    		},
+			});
+
+				const data = await res.json();
 
 		if(data === null) {
 			links = [];
@@ -25,13 +35,32 @@
 		}
 
 		links = data;
+		} catch(err) {
+			console.log(err);
+			accessToken = '';
+		}
+		
+
+	
 
 	}
 
 	
 	onMount(async () => {
+		accessToken = localStorage.getItem('token');
+		if(!accessToken) {
+
+		}
+
 		loadLinks('');
 	})
+
+	function handleLogin() {
+		localStorage.setItem('token', tokenInput)
+		accessToken = tokenInput;
+
+		loadLinks('');
+	}
 
 </script>
 
@@ -39,6 +68,12 @@
 
 	<h1 class="Title"><a href="/">toller.link</a></h1>
 
+	{#if !accessToken}
+	<div class="Login">
+		<input type="text" bind:value={tokenInput}>
+		<button on:click={handleLogin}>Login!</button>
+	</div>
+	{:else}
 	<div class="Search">
 		<input type="text" placeholder="Suche…" class="Search-input" on:input={handleQuery} bind:value={query}>
 	</div>
@@ -56,7 +91,7 @@
 		
 		
 	</div>
-	
+	{/if}
 
 
 </main>

@@ -4,16 +4,20 @@ import (
 	"crypto/sha1"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"regexp"
 	"time"
 
+	"github.com/RediSearch/redisearch-go/redisearch"
+	"github.com/go-co-op/gocron"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
-
-	"github.com/RediSearch/redisearch-go/redisearch"
+	strip "github.com/grokify/html-strip-tags-go"
 )
 
 func saveLinkToRedis(id string, link Link) {
@@ -38,7 +42,11 @@ func saveLinkToRedis(id string, link Link) {
 		Set("tags", link.Tags).
 		Set("date", link.Date)
 
-	if err := c.Index([]redisearch.Document{doc}...); err != nil {
+	var opts redisearch.IndexingOptions
+	opts.Replace = true
+	opts.Partial = true
+
+	if err := c.IndexOptions(opts, []redisearch.Document{doc}...); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -73,25 +81,47 @@ func findInRedis(query string) (links []Link) {
 	return links
 }
 
-func readLink(id string) (link Link) {
-	var filepath string = fmt.Sprintf("content/%s/link.json", id)
-
-	var content, _ = ioutil.ReadFile(filepath)
+func reIndexLinkFromPath(path string) {
+	var link Link
+	var content, _ = ioutil.ReadFile(path)
 
 	err := json.Unmarshal(content, &link)
 	if err != nil {
 		log.Fatal(err)
 		return
 	}
-	/*
-		contentPath := fmt.Sprintf("content/%s/content.html", id)
 
-		if _, err := os.Stat(contentPath); err == nil {
-			linkContent, _ := ioutil.ReadFile(contentPath)
-			link.Body = fmt.Sprintf("%s", linkContent)
-		}
-	*/
+	contentPath := filepath.Join(filepath.Dir(path), "content.html")
+
+	if _, err := os.Stat(contentPath); err == nil {
+		linkContent, _ := ioutil.ReadFile(contentPath)
+		link.Body = strip.StripTags(string(linkContent))
+	}
+
+	parent := filepath.Base(filepath.Dir(path))
+
+	saveLinkToRedis(parent, link)
+}
+
+func readLinkFromPath(path string) (link Link) {
+	var content, _ = ioutil.ReadFile(path)
+
+	err := json.Unmarshal(content, &link)
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
+
 	return link
+}
+
+func readLink(id string) (link Link) {
+	return readLinkFromPath(fmt.Sprintf("content/%s/link.json", id))
+}
+
+func saveLinkToPath(path string, link Link) {
+	jsonString, _ := json.Marshal(link)
+	ioutil.WriteFile(path, jsonString, 0644)
 }
 
 type Link struct {
@@ -135,12 +165,17 @@ func createLink(w http.ResponseWriter, r *http.Request) {
 	if link.Body != "" {
 		ioutil.WriteFile(contentPath, []byte(link.Body), 0644)
 		link.Body = ""
+	} else {
+		ioutil.WriteFile(fmt.Sprintf("content/%s/.needs-content", id), []byte("t"), 0644)
+	}
+
+	if link.Title == "" || link.Title == link.Url {
+		ioutil.WriteFile(fmt.Sprintf("content/%s/.needs-title", id), []byte("t"), 0644)
 	}
 
 	filepath = fmt.Sprintf("%s/link.json", dir)
 
-	jsonString, _ := json.Marshal(link)
-	ioutil.WriteFile(filepath, jsonString, 0644)
+	saveLinkToPath(filepath, link)
 
 	fmt.Fprintf(w, "Link: %+v, %s", link, filepath)
 
@@ -165,6 +200,83 @@ func getLinks(w http.ResponseWriter, r *http.Request) {
 	w.Write(jsonString)
 }
 
+func tokenMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("Authorization")
+
+		if token == os.Getenv("TOKEN") {
+			next.ServeHTTP(w, r)
+		} else {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+		}
+	})
+}
+
+func task() {
+	neededTitles, _ := filepath.Glob("./content/**/.needs-title")
+	for _, file := range neededTitles {
+		linkFile := filepath.Join(filepath.Dir(file), "link.json")
+		link := readLinkFromPath(linkFile)
+
+		response, error := http.Get(link.Url)
+		if error != nil {
+			log.Fatal(error)
+			continue
+		}
+
+		defer response.Body.Close()
+
+		body, error := ioutil.ReadAll(response.Body)
+		if error != nil {
+			log.Fatal(error)
+			continue
+		}
+
+		r, _ := regexp.Compile("<title>(.*?)</title>")
+
+		matches := r.FindStringSubmatch(string(body))
+		title := html.UnescapeString(matches[1])
+
+		link.Title = title
+
+		saveLinkToPath(linkFile, link)
+		os.Remove(file)
+
+		reIndexLinkFromPath(linkFile)
+
+		fmt.Println(title)
+	}
+
+	neededContent, _ := filepath.Glob("./content/**/.needs-content")
+	for _, file := range neededContent {
+		linkFile := filepath.Join(filepath.Dir(file), "link.json")
+		contentFile := filepath.Join(filepath.Dir(file), "content.html")
+		link := readLinkFromPath(linkFile)
+
+		response, error := http.Get(link.Url)
+		if error != nil {
+			log.Fatal(error)
+			continue
+		}
+
+		defer response.Body.Close()
+
+		body, error := ioutil.ReadAll(response.Body)
+		if error != nil {
+			log.Fatal(error)
+			continue
+		}
+
+		ioutil.WriteFile(contentFile, []byte(string(body)), 0644)
+
+		os.Remove(file)
+
+		reIndexLinkFromPath(linkFile)
+
+		fmt.Println("content loaded")
+	}
+}
+
 func main() {
 	args := os.Args[1:]
 
@@ -173,14 +285,20 @@ func main() {
 		return
 	}
 
+	s1 := gocron.NewScheduler(time.UTC)
+	s1.Every(1).Seconds().Do(task)
+	s1.StartAsync()
+
 	r := mux.NewRouter()
 
 	r.HandleFunc("/api/link", getLinks).Methods(http.MethodGet)
 	r.HandleFunc("/api/link", createLink).Methods(http.MethodPost)
+	r.Use(tokenMiddleware)
 
-	headersOk := handlers.AllowedHeaders([]string{"X-Requested-With"})
+	headersOk := handlers.AllowedHeaders([]string{"X-Requested-With", "Authorization"})
 	originsOk := handlers.AllowedOrigins([]string{"*"})
 	methodsOk := handlers.AllowedMethods([]string{"GET", "HEAD", "POST", "PUT", "OPTIONS"})
 
-	log.Fatal(http.ListenAndServe(":8080", handlers.CORS(originsOk, headersOk, methodsOk)(r)))
+	log.Fatal(http.ListenAndServe("127.0.0.1:8080", handlers.CORS(originsOk, headersOk, methodsOk)(r)))
+
 }
